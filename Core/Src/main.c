@@ -3,6 +3,7 @@
   ******************************************************************************
   * @file           : main.c
   * @brief          : Main program body
+  * @Auther:		Abdalla ragab created Base file From MXCube and implemented the algorthim
   ******************************************************************************
   * @attention
   *
@@ -38,6 +39,8 @@
 /* USER CODE BEGIN PM */
 
 #define FLASH_NUM_PAGES			64
+#define MY_RECORD_SIZE			22
+#define MY_BL_SIZE_PAGES		20
 /* -----------CAN MSG IDS--------------------*/
 //incoming
 #define START_SIGNAL_STDID_CAN	0x19
@@ -47,9 +50,11 @@
 #define FRUP_RECORD_STDID_CAN	0x23
 #define FRUP_NLINE_STDID_CAN	0x26
 
+
 #define APP_START_STDID_CAN		0x22
 //outgoing
-#define FRUP_READY				0x27
+#define FRUP_READY					0x27
+#define FRUP_NLINE_RDY_STDID_CAN	0x29
 
 
 /* USER CODE END PM */
@@ -77,10 +82,11 @@ void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_CAN_Init(void);
 static void MX_TIM1_Init(void);
-
 /* USER CODE BEGIN PFP */
 void gotoAPP(void);
 void EraseFlash(uint32_t pageAddress,uint32_t pagesNum);
+void programFlash(uint8_t* frame);
+void HandleMessage(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -99,38 +105,78 @@ void EraseFlash(uint32_t pageAddress,uint32_t pagesNum);
 //  return 0;
 //}
 void HandleMessage(void){
-	static uint8_t tempdata[100];
-	static linesCounter;
-	uint8_t recordsize;
+
+	//code array will contain 4 records
+	// MyFrameShape
+	// RecordSize--HighAddress--LowAddress--recordType--____DATA___---
+	// __1 Byte__--__2_Bytes__--__2_Bytes_--__1 Byte__--__16 Byte__---
+	static uint8_t codearray[MY_RECORD_SIZE*4];
+	static uint8_t linesCounter;
+	static uint8_t recordsize;
+	static uint8_t lastrecordlocation;
+	static uint8_t highAddress;
+	static uint8_t isnewliine;
 	//ciopy the received data to local var
-	for (uint8_t var = 0; var <= RxHeader.DLC; ++var) {
-		tempdata[var]=RxData[var];
-	}
+
 	switch (RxHeader.StdId) {
 		case APP_START_STDID_CAN:
 			gotoAPP();
+			HAL_TIM_Base_Stop_IT(&htim1);
 			break;
 		case FRUP_START_STDID_CAN:
 			//erase flash then send ready
-			EraseFlash(20, FLASH_NUM_PAGES);
+			HAL_TIM_Base_Stop_IT(&htim1);
+			EraseFlash(MY_BL_SIZE_PAGES, FLASH_NUM_PAGES);
 			MTxHeader.DLC=0;
+			MTxHeader.StdId=FRUP_READY;
+			//setnew line flag
+			isnewliine=1;
 			MTxHeader.StdId=FRUP_READY;
 			HAL_CAN_AddTxMessage(&hcan, &MTxHeader, TxData, &Mailbox);
 			break;
 		case FRUP_RECORD_STDID_CAN :
+			//if its a new line and have 04 that incates
+			///the a new address at the high part
+			if (isnewliine) {
+				if (RxData[3]==0x04) {
+					highAddress=(RxData[4]<<8)|(RxData[5]);
+				}
+				isnewliine=0;
+				recordsize=TxData[0];
+				//copy first Byte and add address in the second Byte
+				codearray[(linesCounter*MY_RECORD_SIZE)+0]=TxData[0];
+				codearray[(linesCounter*MY_RECORD_SIZE)+1]=highAddress;
+
+					for (uint8_t var = 0; ((var < RxHeader.DLC)&&(var < recordsize)); ++var) {
+						codearray[(linesCounter*MY_RECORD_SIZE)+2+var]=RxData[var+1];
+					}
+					lastrecordlocation=8;
+				}
+			else{
+				for (uint8_t var = 0; ((var < RxHeader.DLC)&&(var < recordsize)); ++var) {
+					//add 1Byte offset for the HIgh address part i added
+					codearray[(linesCounter*MY_RECORD_SIZE)+1+lastrecordlocation+var]=RxData[var];
+				}
+			}
+
 			break;
 		case FRUP_NLINE_STDID_CAN:
+			isnewliine=1;
 			linesCounter++;
 			break;
 		default:
 			break;
 	}
 	if(linesCounter==4){
-		writeDataToFlash(recordsize, tempdata, 4);
+		//writeDataToFlash(recordsize, tempdata, 4);
+		programFlash(codearray);
+		lastrecordlocation=0;
 		linesCounter=0;
-		memset(tempdata, '\0',100);
+		MTxHeader.StdId=FRUP_NLINE_RDY_STDID_CAN;
+		HAL_CAN_AddTxMessage(&hcan, &MTxHeader, TxData, &Mailbox);
+
 	}
-	//send here the ok value
+		//send here the ok value
 
 
 
@@ -153,19 +199,24 @@ void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
 }
 
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim){
-	 if (htim->Instance == TIM1)
+	static uint8_t callCounter;
+	if (htim->Instance == TIM1)
 	    {
+		 if (callCounter) {
+
 		 	 HAL_TIM_Base_Stop_IT(&htim1);
 	        // Call the function
 	        gotoAPP();
 
 	        // Stop the Timer
 
-	    }
+	    }}
+	callCounter++;
 
 }
 
 void gotoAPP(void) {
+
 	HAL_TIM_Base_Stop_IT(&htim1);
 	//SCB->VTOR = FLASH_ADDRESS;
 	Function_t jumpFunc;
@@ -203,6 +254,48 @@ void EraseFlash(uint32_t pageAddress,uint32_t pagesNum){
 
 }
 
+
+void programFlash(uint8_t* frame) {
+    // Extract the record size, high address, low address, and record type from the frame
+    for(uint8_t var=0;var<4;var++){
+	uint8_t recordSize = frame[0+(var*MY_RECORD_SIZE)];
+    uint16_t highAddress = (frame[1+(var*MY_RECORD_SIZE)] << 8) | frame[2+(var*MY_RECORD_SIZE)];
+    uint16_t lowAddress = (frame[3+(var*MY_RECORD_SIZE)] << 8) | frame[4+(var*MY_RECORD_SIZE)];
+    uint8_t recordType = frame[5+(var*MY_RECORD_SIZE)];
+
+    // Pointer to the data in the frame
+    uint8_t* data = &frame[6+(var*MY_RECORD_SIZE)];
+
+    // Calculate the total number of bytes to be written to flash
+    uint32_t totalBytes = recordSize - 5; // Record size minus overhead bytes (5 bytes)
+
+    // Check if the record type is valid for programming flash
+    if (recordType == 0x00) {
+        // Disable interrupts while programming flash
+        __disable_irq();
+
+        // Unlock the flash memory
+        HAL_FLASH_Unlock();
+
+        // Erase the flash sector where the data will be written
+        uint32_t flashAddress = (highAddress << 16) | lowAddress;
+
+        // Program the data into flash
+        for (uint32_t i = 0; i < totalBytes; i += 4) {
+            uint32_t word = *(uint32_t*)(data + i);
+            HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, flashAddress + i, word);
+        }
+    }
+
+        // Lock the flash memory again
+        HAL_FLASH_Lock();
+
+        // Enable interrupts
+        __enable_irq();
+    }
+}
+
+/*
 // Function to write data to flash memory
 void writeDataToFlash(uint32_t address, uint8_t *data, uint32_t length)
 {
@@ -227,6 +320,7 @@ void writeDataToFlash(uint32_t address, uint8_t *data, uint32_t length)
     // Lock the Flash interface
     HAL_FLASH_Lock();
 }
+*/
 /* USER CODE END 0 */
 
 /**
@@ -258,7 +352,6 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_CAN_Init();
-  MX_TIM1_Init();
   /* USER CODE BEGIN 2 */
   MTxHeader.DLC = 1;
   MTxHeader.ExtId = 0;
@@ -273,7 +366,10 @@ int main(void)
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
+  //HAL_TIMEx_OCN_Start(htim, Channel)
+  MX_TIM1_Init();
   HAL_TIM_Base_Start_IT(&htim1);
+
   while (1)
   {
     /* USER CODE END WHILE */
@@ -337,7 +433,7 @@ static void MX_CAN_Init(void)
 
   /* USER CODE END CAN_Init 1 */
   hcan.Instance = CAN1;
-  hcan.Init.Prescaler = 16;
+  hcan.Init.Prescaler = 65536;
   hcan.Init.Mode = CAN_MODE_NORMAL;
   hcan.Init.SyncJumpWidth = CAN_SJW_1TQ;
   hcan.Init.TimeSeg1 = CAN_BS1_2TQ;
@@ -386,13 +482,13 @@ static void MX_TIM1_Init(void)
   TIM_MasterConfigTypeDef sMasterConfig = {0};
 
   /* USER CODE BEGIN TIM1_Init 1 */
-
+  //uwPrescalerValue = (uint32_t)(SystemCoreClock / 10000) - 1;
   /* USER CODE END TIM1_Init 1 */
   htim1.Instance = TIM1;
-  htim1.Init.Prescaler = 0;
+  htim1.Init.Prescaler = 0xffff;
   htim1.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim1.Init.Period = 65535;
-  htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV2;
+  htim1.Init.Period = 50000 - 1;
+  htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV4;
   htim1.Init.RepetitionCounter = 0;
   htim1.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
   if (HAL_TIM_Base_Init(&htim1) != HAL_OK)
