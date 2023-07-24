@@ -1,2 +1,2 @@
 eclipse.preferences.version=1
-sfrviewstate={"fFavorites"\:{"fLists"\:{}},"fProperties"\:{"fNodeProperties"\:{"STM32F103/TIM1/CNT"\:{"fNodeProperties"\:{"autoupdate"\:"true"}}}}}
+sfrviewstate={"fFavorites"\:{"fLists"\:{"tim1"\:["STM32F103/TIM1","Cortex_M3/SysTick"]}},"fProperties"\:{"fNodeProperties"\:{"STM32F103/TIM1/CNT"\:{"fNodeProperties"\:{"autoupdate"\:"true"}},"Cortex_M3/SysTick/STCVR"\:{"fNodeProperties"\:{"autoupdate"\:"true"}}}}}
