@@ -18,8 +18,8 @@
   */
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
-#include "main.h"
 
+#include "main.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 
@@ -38,25 +38,40 @@
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
 
+#define ST1_BOOTLOADER			1
+#define ST2_BOOTLOADER			2
+
+/*change this macro according to the Desired ST*/
+#define ST_BOOTLOADER			ST1_BOOTLOADER
+
 #define FLASH_NUM_PAGES			64
 #define MY_RECORD_SIZE			22
 #define MY_BL_SIZE_PAGES		20
-/* -----------CAN MSG IDS--------------------*/
-//incoming
-#define START_SIGNAL_STDID_CAN	0x19
-#define START_SIGNAL_DATA_CAN	0x0
-//ST1 -BMS BMS Sensors
-#define FRUP_START_STDID_CAN	0x16
-#define FRUP_RECORD_STDID_CAN	0x23
-#define FRUP_NLINE_STDID_CAN	0x26
+/* ---------------------------CAN MSG IDS--------------------*/
+#if (ST_BOOTLOADER==ST1_BOOTLOADER)
+/***********************Incoming Messages************************/
+#define APP_START_STDID_CAN			0x22      /*Skip BootLoader and start */
+#define FRUP_START_STDID_CAN		0x16      /*BootLoader enter firmware Upgrade Mode */
+#define FRUP_RECORD_STDID_CAN		0x23      /*Data in hex transfer */
+#define FRUP_NLINE_STDID_CAN		0x26      /*New Line in hex transfer */
+/***********************Outgoing Messages************************/
+#define FRUP_READY					0x27      /*ready to receive firmware*/
+#define FRUP_NLINE_RDY_STDID_CAN	0x29      /*ready to receive next Data*/
+#define ECU_START_SIGNAL			0x19      /*the microController started signal*/
+#else
+/***********************Incoming Messages************************/
+#define APP_START_STDID_CAN			0x21		/*Skip BootLoader and start */
+#define FRUP_START_STDID_CAN		0x17	/*BootLoader enter firmware Upgrade Mode */
+#define FRUP_RECORD_STDID_CAN		0x24	/*Data in hex transfer */
+#define FRUP_NLINE_STDID_CAN		0x25	/*New Line in hex transfer */
 
 
-#define APP_START_STDID_CAN		0x22
-//outgoing
-#define FRUP_READY					0x27
-#define FRUP_NLINE_RDY_STDID_CAN	0x29
-#define ECU_START_SIGNAL			0x19
+/***********************Outgoing Messages************************/
+#define FRUP_READY					0x27	/*ready to receive firmware*/
+#define FRUP_NLINE_RDY_STDID_CAN	0x29	/*ready to receive next Data*/
+#define ECU_START_SIGNAL			0x20	/*the microController started signal*/
 
+#endif
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
@@ -85,12 +100,11 @@ static void MX_TIM1_Init(void);
 /* USER CODE BEGIN PFP */
 static void gotoAPP(void);
 void EraseFlash(uint32_t pageNumber,uint32_t pagesNum);
-void programFlash(uint8_t* frame);
+void programFlash(uint8_t* frame,uint8_t linesNum);
 void HandleMessage(void);
 uint32_t getAddressFromPage(uint32_t pageNum);
 void resetSysTick(void);
 void DeinitEverything();
-static void goto_application( void );
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -193,6 +207,7 @@ int main(void)
   /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
   HAL_Init();
 
+
   /* USER CODE BEGIN Init */
 
   /* USER CODE END Init */
@@ -222,22 +237,16 @@ int main(void)
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-    MTxHeader.StdId=ECU_START_SIGNAL;
-    HAL_CAN_AddTxMessage(&hcan, &MTxHeader, TxData, &Mailbox);
-
+  MTxHeader.StdId=ECU_START_SIGNAL;
+  HAL_CAN_AddTxMessage(&hcan, &MTxHeader, TxData, &Mailbox);
   MX_TIM1_Init();
   HAL_TIM_Base_Start_IT(&htim1);
-
   while (1)
   {
     /* USER CODE END WHILE */
     /* USER CODE BEGIN 3 */
-
-
-
 			  if(jump==1){
 				  gotoAPP();
-
 			  }
 			  HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_13);
 			  HAL_Delay(100);
@@ -422,14 +431,26 @@ void EraseFlash(uint32_t pageNumber,uint32_t pagesNum){
     flsherastemp.PageAddress=getAddressFromPage(pageNumber);
     //flsherastemp.Banks=FLASH_BANK_1;
 	uint32_t PAGEError;
-    HAL_FLASH_Unlock();
     HAL_FLASHEx_Erase(&flsherastemp, &PAGEError);
 	FLASH_WaitForLastOperation(5000);
 	HAL_FLASH_Lock();
 
 }
 
-
+/**
+ * @brief Handles incoming CAN messages and processes them accordingly.
+ *
+ * This function is responsible for processing different CAN messages received
+ * and taking appropriate actions based on the message content and type.
+ *
+ * @note This function expects specific CAN messages with predefined message IDs,
+ *       and it performs actions based on the received data and message ID.
+ *
+ * @note This function utilizes various static variables to keep track of the
+ *       received data and the state of the processing.
+ *
+ * @retval None.
+ */
 void HandleMessage(void){
 
 	//code array will contain 4 records
@@ -445,10 +466,14 @@ void HandleMessage(void){
 	//ciopy the received data to local var
 
 	switch (RxHeader.StdId) {
+		//signal that indicates direct start command
 		case APP_START_STDID_CAN:
 			HAL_TIM_Base_Stop_IT(&htim1);
 			jump=1;
+			MTxHeader.StdId=FRUP_NLINE_RDY_STDID_CAN;
+			HAL_CAN_AddTxMessage(&hcan, &MTxHeader, TxData, &Mailbox);
 			break;
+		//signal that indicates there is a file will be sent
 		case FRUP_START_STDID_CAN:
 			//erase flash then send ready
 			HAL_TIM_Base_Stop_IT(&htim1);
@@ -459,6 +484,8 @@ void HandleMessage(void){
 			isnewliine=1;
 			MTxHeader.StdId=FRUP_READY;
 			HAL_CAN_AddTxMessage(&hcan, &MTxHeader, TxData, &Mailbox);
+			MTxHeader.StdId=FRUP_NLINE_RDY_STDID_CAN;
+			HAL_CAN_AddTxMessage(&hcan, &MTxHeader, TxData, &Mailbox);
 			break;
 		case FRUP_RECORD_STDID_CAN :
 			//if its a new line and have 04 that incates
@@ -467,8 +494,12 @@ void HandleMessage(void){
 				if (RxData[3]==0x04) {
 					highAddress=(RxData[4]<<8)|(RxData[5]);
 				}
+				//Indicates end of file received
 				else if(RxData[3]==0x01){
+					//if the current record is end of file,write the current date in buffer to flash
+					programFlash(codearray,linesCounter);
 					jump=1;
+					break;
 
 				}
 				isnewliine=0;
@@ -494,34 +525,62 @@ void HandleMessage(void){
 				}
 				lastrecordlocation+=currentRecordLoc;
 			}
+			MTxHeader.StdId=FRUP_NLINE_RDY_STDID_CAN;
+			HAL_CAN_AddTxMessage(&hcan, &MTxHeader, TxData, &Mailbox);
 
 			break;
+			//a message that indicates there is a new line in hex file
 		case FRUP_NLINE_STDID_CAN:
 			isnewliine=1;
 			linesCounter++;
 			if(linesCounter==4){
-					//writeDataToFlash(recordsize, tempdata, 4);
-					programFlash(codearray);
+					//writeDataToFlash(data, number of records);
+					programFlash(codearray,linesCounter);
 					lastrecordlocation=0;
 					linesCounter=0;
 
 				}
-				//send here the ok value
+			MTxHeader.StdId=FRUP_NLINE_RDY_STDID_CAN;
+			HAL_CAN_AddTxMessage(&hcan, &MTxHeader, TxData, &Mailbox);
 			break;
 		default:
 			break;
 	}
-	MTxHeader.StdId=FRUP_NLINE_RDY_STDID_CAN;
-	HAL_CAN_AddTxMessage(&hcan, &MTxHeader, TxData, &Mailbox);
+	//send here the ok value
+
 
 
 
 
 }
-
-void programFlash(uint8_t* frame) {
+/**
+ * @brief Programs the provided data frames into the Flash memory.
+ *
+ * This function takes an array of data frames along with the number of frames to be programmed
+ * and writes the data contained in those frames into the Flash memory.
+ *
+ * @param frame Pointer to an array of data frames.
+ * @param linesNum Number of data frames to be programmed.
+ *
+ * @note The provided data frames must adhere to a specific format, including the record size,
+ *       high and low addresses, record type, and data. Only records with a valid record type (0x00)
+ *       will be programmed into the Flash memory.
+ *       @ref MyFrameShape
+ *
+ * @warning This function disables interrupts during the Flash programming process. It is the caller's
+ *          responsibility to ensure that interrupt-sensitive operations are handled appropriately.
+ *
+ * @note This function unlocks the Flash memory, erases the appropriate sector, and programs
+ *       the data into the Flash memory.
+ *
+ * @note It is important to check the Flash programming specifications of the target microcontroller
+ *       and ensure proper Flash sector alignment and erase before using this function.
+ *
+ * @retval None.
+ */
+void programFlash(uint8_t* frame,uint8_t linesNum) {
     // Extract the record size, high address, low address, and record type from the frame
-    for(uint8_t var=0;var<4;var++){
+    for(uint8_t var=0;var<linesNum;var++){
 	uint8_t recordSize = frame[0+(var*MY_RECORD_SIZE)];
     uint16_t highAddress = (frame[1+(var*MY_RECORD_SIZE)] << 8) | frame[2+(var*MY_RECORD_SIZE)];
     uint16_t lowAddress = (frame[3+(var*MY_RECORD_SIZE)] << 8) | frame[4+(var*MY_RECORD_SIZE)];
